@@ -1,4 +1,4 @@
-[![DOI](https://zenodo.org/badge/1326772835.svg)](https://doi.org/10.5281/zenodo.21840700)
+[![DOI](https://zenodo.org/badge/1326772835.svg)](https://doi.org/10.5281/zenodo.21840701)
 
 # AHT Decision-Support Framework
 
