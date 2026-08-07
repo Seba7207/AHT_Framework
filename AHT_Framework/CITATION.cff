@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: "AHT Decision-Support Framework"
+authors:
+  - family-names: Glowinski
+    given-names: Sebastian
+  - family-names: Glowinska
+    given-names: Alina
+license: MIT
