@@ -1,4 +1,8 @@
+[![DOI](https://zenodo.org/badge/1326772835.svg)](https://doi.org/10.5281/zenodo.21840700)
+
 # AHT Decision-Support Framework
+
+Conceptual Decision-Support Framework
 
 Repository accompanying the manuscript:
 'A Conceptual Decision-Support Framework for Structured Assessment of Suspected Abusive Head Trauma'
