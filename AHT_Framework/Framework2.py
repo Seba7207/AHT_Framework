@@ -4,9 +4,9 @@
 """
 AHT Decision-Support Framework
 
-Implementation accompanying the manuscript:
+Reproducible implementation accompanying:
 
-"A Conceptual Decision-Support Framework for Structured Assessment
+"A Knowledge-Based Decision-Support Framework for Structured Assessment
 of Suspected Abusive Head Trauma"
 
 Authors:
@@ -14,10 +14,20 @@ Authors:
     Alina Glowinska
 
 Version:
-    1.0
+    2.0
 
 Python:
     >=3.9
+
+Notes
+-----
+Figure 1 in the manuscript is the conceptual flowchart and is not generated
+programmatically by this script.
+
+This script generates Figures 2-6 and the numerical data used for the
+scenario, contribution, contour, clinical-case, and coefficient-sensitivity
+analyses. The framework output is a diagnostic support score and is NOT a
+statistical estimate of the probability of AHT.
 """
 
 from pathlib import Path
@@ -32,7 +42,6 @@ import matplotlib.pyplot as plt
 # =============================================================================
 
 ROOT_DIR = Path(__file__).resolve().parent
-
 DATA_DIR = ROOT_DIR / "data"
 FIGURES_DIR = ROOT_DIR / "figures"
 
@@ -44,124 +53,413 @@ FIGURES_DIR.mkdir(exist_ok=True)
 # Framework parameters
 # =============================================================================
 
-BETA0 = -0.50
+BETA0 = 0.50
 
 DOMAIN_WEIGHTS = {
     "C": 0.15,
     "I": 0.25,
     "R": 0.30,
     "H": 0.10,
-    "D": 0.15,
-    "U": 0.05,
+    "D": 0.10,
+    "U": 0.10,
 }
 
+CLINICAL_WEIGHTS = np.array([0.40, 0.20, 0.20, 0.20])
+IMAGING_WEIGHTS = np.array([0.30, 0.30, 0.20, 0.20])
+RETINAL_WEIGHTS = np.array([0.25, 0.25, 0.30, 0.20])
+HISTORY_WEIGHTS = np.array([0.40, 0.25, 0.20, 0.15])
+DIFFERENTIAL_WEIGHTS = np.array([0.35, 0.30, 0.20, 0.15])
+UNCERTAINTY_WEIGHTS = np.array([0.30, 0.30, 0.20, 0.20])
+
+REFERENCE_SCENARIO = {
+    "C": 0.70,
+    "I": 0.70,
+    "R": 0.70,
+    "H": 0.50,
+    "D": 0.30,
+    "U": 0.30,
+}
+
+MINIMUM_SCENARIO = {
+    "C": 0.00,
+    "I": 0.00,
+    "R": 0.00,
+    "H": 0.00,
+    "D": 1.00,
+    "U": 1.00,
+}
+
+MAXIMUM_SCENARIO = {
+    "C": 1.00,
+    "I": 1.00,
+    "R": 1.00,
+    "H": 1.00,
+    "D": 0.00,
+    "U": 0.00,
+}
+
+SCENARIO_2 = {
+    "C": 0.90,
+    "I": 1.00,
+    "R": 0.90,
+    "H": 0.80,
+    "D": 0.10,
+    "U": 0.10,
+}
+
+SCENARIO_3 = {
+    "C": 0.70,
+    "I": 0.50,
+    "R": 0.40,
+    "H": 0.50,
+    "D": 0.70,
+    "U": 0.60,
+}
+
+CLINICAL_CASE_SEED = 20260811
+CLINICAL_CASE_N = 10000
+
 
 # =============================================================================
-# Within-domain contribution coefficients
-# =============================================================================
-
-CLINICAL_WEIGHTS = np.array(
-    [0.40, 0.20, 0.20, 0.20]
-)
-
-IMAGING_WEIGHTS = np.array(
-    [0.30, 0.30, 0.20, 0.20]
-)
-
-RETINAL_WEIGHTS = np.array(
-    [0.25, 0.25, 0.30, 0.20]
-)
-
-HISTORY_WEIGHTS = np.array(
-    [0.40, 0.25, 0.20, 0.15]
-)
-
-DIFFERENTIAL_WEIGHTS = np.array(
-    [0.35, 0.30, 0.20, 0.15]
-)
-
-UNCERTAINTY_WEIGHTS = np.array(
-    [0.30, 0.30, 0.20, 0.20]
-)
-
-
-# =============================================================================
-# Utility functions
+# Core functions
 # =============================================================================
 
 def logistic(score):
-    """
-    Logistic transformation.
-
-    Parameters
-    ----------
-    score : float
-        Linear score.
-
-    Returns
-    -------
-    float
-        Probability.
-    """
-
-    return 1.0 / (1.0 + np.exp(-score))
+    """Apply the logistic transformation to the linear predictor."""
+    return 1.0 / (1.0 + np.exp(-np.asarray(score)))
 
 
 def weighted_score(values, weights):
-    """
-    Calculates weighted contribution of one diagnostic domain.
-    """
-
+    """Calculate a weighted average within one diagnostic domain."""
     values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    if values.shape != weights.shape:
+        raise ValueError("Values and weights must have the same length.")
+    return float(np.sum(values * weights))
 
-    return np.sum(values * weights)
-
-
-# =============================================================================
-# Diagnostic domains
-# =============================================================================
 
 def compute_C(values):
-    """Clinical domain."""
     return weighted_score(values, CLINICAL_WEIGHTS)
 
 
 def compute_I(values):
-    """Imaging domain."""
     return weighted_score(values, IMAGING_WEIGHTS)
 
 
 def compute_R(values):
-    """Retinal domain."""
     return weighted_score(values, RETINAL_WEIGHTS)
 
 
 def compute_H(values):
-    """History domain."""
     return weighted_score(values, HISTORY_WEIGHTS)
 
 
 def compute_D(values):
-    """Differential diagnosis domain."""
     return weighted_score(values, DIFFERENTIAL_WEIGHTS)
 
 
 def compute_U(values):
-    """Diagnostic uncertainty domain."""
     return weighted_score(values, UNCERTAINTY_WEIGHTS)
 
 
-# =============================================================================
-# Probability model
-# =============================================================================
-
-def compute_probability(C, I, R, H, D, U, beta0=BETA0):
+def compute_support_score(C, I, R, H, D, U, beta0=BETA0,
+                          domain_weights=DOMAIN_WEIGHTS):
     """
-    Computes AHT probability.
-    """
+    Compute the bounded diagnostic support score.
 
-    score = (
+    The returned value is a computational framework output. It must not be
+    interpreted as a clinical probability of AHT.
+    """
+    linear_score = (
         beta0
+        + domain_weights["C"] * C
+        + domain_weights["I"] * I
+        + domain_weights["R"] * R
+        + domain_weights["H"] * H
+        - domain_weights["D"] * D
+        - domain_weights["U"] * U
+    )
+    return float(logistic(linear_score)), float(linear_score)
+
+
+def scenario_to_array(scenario):
+    return np.array(
+        [scenario["C"], scenario["I"], scenario["R"],
+         scenario["H"], scenario["D"], scenario["U"]],
+        dtype=float,
+    )
+
+
+def calculate_scenario(scenario, beta0=BETA0, domain_weights=DOMAIN_WEIGHTS):
+    values = scenario_to_array(scenario)
+    return compute_support_score(*values, beta0=beta0,
+                                 domain_weights=domain_weights)
+
+
+# =============================================================================
+# Figure 2: baseline parameter sensitivity
+# =============================================================================
+
+def beta_sensitivity():
+    """Generate data for Figure 2."""
+    beta_values = np.arange(-0.50, 0.501, 0.05)
+    scores = []
+
+    for beta in beta_values:
+        score, _ = calculate_scenario(
+            REFERENCE_SCENARIO,
+            beta0=float(beta),
+        )
+        scores.append(score)
+
+    df = pd.DataFrame({
+        "beta0": beta_values,
+        "Diagnostic_support_score": scores,
+        "Diagnostic_support_score_percent": np.asarray(scores) * 100,
+    })
+
+    df.to_csv(DATA_DIR / "Figure2_beta_sensitivity.csv", index=False)
+    return df
+
+
+def plot_beta_sensitivity(df):
+    plt.figure(figsize=(8, 6))
+    plt.plot(
+        df["beta0"],
+        df["Diagnostic_support_score_percent"],
+        "-o",
+        linewidth=2,
+        markersize=5,
+    )
+    plt.xlabel(r"$\beta_0$")
+    plt.ylabel("Diagnostic support score (%)")
+    plt.title("Effect of the baseline parameter ($\\beta_0$)")
+    plt.grid(True, alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(
+        FIGURES_DIR / "Figure2_beta_sensitivity.png",
+        dpi=600,
+        bbox_inches="tight",
+    )
+    plt.close()
+
+
+# =============================================================================
+# Figure 3: minimum/reference/maximum scenarios
+# =============================================================================
+
+def scenario_analysis():
+    """Generate data for Figure 3."""
+    beta_values = np.arange(-0.50, 0.501, 0.05)
+
+    rows = []
+    for beta in beta_values:
+        row = {"beta0": float(beta)}
+        for name, scenario in (
+            ("Minimum", MINIMUM_SCENARIO),
+            ("Reference", REFERENCE_SCENARIO),
+            ("Maximum", MAXIMUM_SCENARIO),
+        ):
+            value, _ = calculate_scenario(scenario, beta0=float(beta))
+            row[name] = value
+            row[f"{name}_percent"] = value * 100
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(DATA_DIR / "Figure3_scenarios.csv", index=False)
+    return df
+
+
+def plot_scenarios(df):
+    plt.figure(figsize=(8, 6))
+    plt.plot(
+        df["beta0"], df["Minimum_percent"],
+        linewidth=2, label="Minimum scenario"
+    )
+    plt.plot(
+        df["beta0"], df["Reference_percent"],
+        linewidth=2, label="Reference scenario"
+    )
+    plt.plot(
+        df["beta0"], df["Maximum_percent"],
+        linewidth=2, label="Maximum scenario"
+    )
+    plt.xlabel(r"$\beta_0$")
+    plt.ylabel("Diagnostic support score (%)")
+    plt.title("Diagnostic support score across representative scenarios")
+    plt.legend()
+    plt.grid(True, alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(
+        FIGURES_DIR / "Figure3_scenarios.png",
+        dpi=600,
+        bbox_inches="tight",
+    )
+    plt.close()
+
+
+# =============================================================================
+# Figure 4: domain contribution analysis
+# =============================================================================
+
+def domain_contribution_analysis():
+    """
+    Calculate relative contributions under the maximum scenario.
+
+    D and U are zero in the maximum scenario and are therefore excluded.
+    Contributions are normalized to sum to 100%.
+    """
+    active = {
+        "Retinal (R)": DOMAIN_WEIGHTS["R"] * MAXIMUM_SCENARIO["R"],
+        "Imaging (I)": DOMAIN_WEIGHTS["I"] * MAXIMUM_SCENARIO["I"],
+        "Clinical (C)": DOMAIN_WEIGHTS["C"] * MAXIMUM_SCENARIO["C"],
+        "History (H)": DOMAIN_WEIGHTS["H"] * MAXIMUM_SCENARIO["H"],
+    }
+
+    labels = list(active.keys())
+    raw = np.asarray(list(active.values()), dtype=float)
+    contribution = raw / raw.sum() * 100.0
+    cumulative = np.cumsum(contribution)
+
+    df = pd.DataFrame({
+        "Component": labels,
+        "Contribution_percent": contribution,
+        "Cumulative_percent": cumulative,
+    })
+
+    df.to_csv(DATA_DIR / "Figure4_domain_contributions.csv", index=False)
+    return df
+
+
+def plot_domain_contributions(df):
+    fig, ax1 = plt.subplots(figsize=(9, 6))
+
+    x = np.arange(len(df))
+    ax1.bar(
+        x,
+        df["Contribution_percent"],
+        edgecolor="black",
+    )
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(df["Component"], rotation=30, ha="right")
+    ax1.set_ylabel("Relative contribution (%)")
+    ax1.set_ylim(0, 100)
+
+    ax2 = ax1.twinx()
+    ax2.plot(
+        x,
+        df["Cumulative_percent"],
+        "-o",
+        linewidth=2,
+    )
+    ax2.set_ylabel("Cumulative contribution (%)")
+    ax2.set_ylim(0, 110)
+
+    plt.title("Relative contribution of active diagnostic domains")
+    plt.tight_layout()
+    plt.savefig(
+        FIGURES_DIR / "Figure4_domain_contributions.png",
+        dpi=600,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+# =============================================================================
+# Figure 5: joint influence of R and I
+# =============================================================================
+
+def contour_analysis():
+    """
+    Generate the Figure 5 heatmap/contour matrix.
+
+    I and R range from 0.2 to 1.0. C, H, D and U remain fixed at the
+    reference-scenario values.
+    """
+    i_values = np.linspace(0.20, 1.00, 81)
+    r_values = np.linspace(0.20, 1.00, 81)
+
+    z = np.zeros((len(i_values), len(r_values)))
+
+    for i, imaging in enumerate(i_values):
+        for j, retinal in enumerate(r_values):
+            score, _ = compute_support_score(
+                REFERENCE_SCENARIO["C"],
+                imaging,
+                retinal,
+                REFERENCE_SCENARIO["H"],
+                REFERENCE_SCENARIO["D"],
+                REFERENCE_SCENARIO["U"],
+            )
+            z[i, j] = score * 100.0
+
+    matrix = pd.DataFrame(
+        z,
+        index=np.round(i_values, 4),
+        columns=np.round(r_values, 4),
+    )
+    matrix.index.name = "I"
+    matrix.columns.name = "R"
+    matrix.to_csv(DATA_DIR / "Figure5_contour_matrix.csv")
+
+    return r_values, i_values, z
+
+
+def plot_contour(r_values, i_values, z):
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    contour = ax.contourf(
+        r_values,
+        i_values,
+        z,
+        levels=25,
+    )
+
+    ax.contour(
+        r_values,
+        i_values,
+        z,
+        levels=10,
+        colors="black",
+        linewidths=0.6,
+        linestyles="dashed",
+    )
+
+    ax.set_xlabel("Retinal findings (R)")
+    ax.set_ylabel("Information domain (I)")
+
+    colorbar = fig.colorbar(contour, ax=ax)
+    colorbar.set_label("Diagnostic support score (%)")
+
+    plt.tight_layout()
+    plt.savefig(
+        FIGURES_DIR / "Figure5_contour.png",
+        dpi=600,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+# =============================================================================
+# Figure 6: illustrative clinical case
+# =============================================================================
+
+def clinical_case_simulation(n=CLINICAL_CASE_N, seed=CLINICAL_CASE_SEED):
+    """
+    Simulate the illustrative clinical case using the case-specific ranges
+    reported in the manuscript.
+    """
+    rng = np.random.default_rng(seed)
+
+    C = np.full(n, 0.80)
+    I = rng.uniform(0.80, 1.00, n)
+    R = rng.uniform(0.70, 0.90, n)
+    H = rng.uniform(0.40, 0.60, n)
+    D = rng.uniform(0.30, 0.50, n)
+    U = rng.uniform(0.40, 0.60, n)
+
+    scores = logistic(
+        BETA0
         + DOMAIN_WEIGHTS["C"] * C
         + DOMAIN_WEIGHTS["I"] * I
         + DOMAIN_WEIGHTS["R"] * R
@@ -170,571 +468,288 @@ def compute_probability(C, I, R, H, D, U, beta0=BETA0):
         - DOMAIN_WEIGHTS["U"] * U
     )
 
-    probability = logistic(score)
-
-    return probability, score
-
-
-# =============================================================================
-# Interpretation
-# =============================================================================
-
-def classify_probability(probability):
-    """
-    Returns qualitative interpretation.
-    """
-
-    if probability < 0.20:
-        return "Very low"
-
-    if probability < 0.40:
-        return "Low"
-
-    if probability < 0.60:
-        return "Indeterminate"
-
-    if probability < 0.80:
-        return "High"
-
-    return "Very high"
-
-
-# =============================================================================
-# Example calculation
-# =============================================================================
-
-def run_example():
-    """
-    Demonstration of framework operation.
-    """
-
-    C = compute_C([0.8, 0.7, 0.8, 0.6])
-    I = compute_I([0.9, 0.8, 0.7, 0.8])
-    R = compute_R([0.9, 0.8, 0.9, 0.8])
-    H = compute_H([0.6, 0.5, 0.5, 0.4])
-    D = compute_D([0.4, 0.3, 0.2, 0.3])
-    U = compute_U([0.5, 0.4, 0.4, 0.5])
-
-    probability, score = compute_probability(
-        C, I, R, H, D, U
-    )
-
-    print("\n===== AHT Framework =====")
-
-    print(f"C = {C:.3f}")
-    print(f"I = {I:.3f}")
-    print(f"R = {R:.3f}")
-    print(f"H = {H:.3f}")
-    print(f"D = {D:.3f}")
-    print(f"U = {U:.3f}")
-
-    print(f"\nScore = {score:.3f}")
-    print(f"P(AHT) = {probability:.3f}")
-    print(
-        f"Interpretation = "
-        f"{classify_probability(probability)}"
-    )
-
-
-# =============================================================================
-# Figure 1
-# =============================================================================
-
-def beta_sensitivity():
-    """
-    Sensitivity analysis of the baseline parameter β0.
-    """
-
-    beta_values = np.arange(-0.50, 0.51, 0.05)
-
-    probabilities = []
-
-    C = 0.70
-    I = 0.70
-    R = 0.70
-    H = 0.50
-    D = 0.30
-    U = 0.30
-
-    for beta in beta_values:
-
-        probability, _ = compute_probability(
-            C,
-            I,
-            R,
-            H,
-            D,
-            U,
-            beta,
-        )
-
-        probabilities.append(probability * 100)
-
-    df = pd.DataFrame(
-        {
-            "beta0": beta_values,
-            "Probability": probabilities,
-        }
-    )
-
-    df.to_csv(
-        DATA_DIR / "beta_sensitivity.csv",
-        index=False,
-    )
-
-    return df
-
-
-
-# =============================================================================
-# Figure 1
-# =============================================================================
-
-def plot_beta_sensitivity(df):
-    """
-    Generates Figure 1 showing the influence of β0.
-    """
-
-    plt.figure(figsize=(8, 6))
-
-    plt.plot(
-        df["beta0"],
-        df["Probability"],
-        "-o",
-        linewidth=3,
-        markersize=6,
-    )
-
-    plt.axhspan(0, 20, color="#c6dbef", alpha=0.35)
-    plt.axhspan(20, 40, color="#9ecae1", alpha=0.35)
-    plt.axhspan(40, 60, color="#fee391", alpha=0.35)
-    plt.axhspan(60, 80, color="#fdae6b", alpha=0.35)
-    plt.axhspan(80, 100, color="#fb6a4a", alpha=0.35)
-
-    plt.xlabel(r"$\beta_0$", fontsize=12)
-
-    plt.ylabel(
-        "Diagnostic support score (%)",
-        fontsize=12,
-    )
-
-    plt.title(
-        "Influence of baseline parameter",
-        fontsize=13,
-    )
-
-    plt.grid(True)
-
-    plt.tight_layout()
-
-    plt.savefig(
-        FIGURES_DIR / "Figure1_beta_sensitivity.png",
-        dpi=600,
-    )
-
-    plt.close()
-
-
-# =============================================================================
-# Scenario analysis
-# =============================================================================
-    
-    
-    
-    
-    
-# =============================================================================
-# Scenario analysis
-# =============================================================================
-
-def scenario_analysis():
-    """
-    Computes three representative diagnostic scenarios.
-    """
-
-    beta_values = np.arange(-0.50, 0.51, 0.05)
-
-    scenarios = {
-        "Minimum": (0.0, 0.0, 0.0, 0.0, 1.0, 1.0),
-        "Reference": (0.7, 0.7, 0.7, 0.5, 0.3, 0.3),
-        "Maximum": (1.0, 1.0, 1.0, 1.0, 0.0, 0.0),
-    }
-
-    results = {}
-
-    for name, values in scenarios.items():
-
-        curve = []
-
-        for beta in beta_values:
-
-            probability, _ = compute_probability(
-                values[0],
-                values[1],
-                values[2],
-                values[3],
-                values[4],
-                values[5],
-                beta,
-            )
-
-            curve.append(probability * 100)
-
-        results[name] = curve
-
-    df = pd.DataFrame(
-        {
-            "beta0": beta_values,
-            "Minimum": results["Minimum"],
-            "Reference": results["Reference"],
-            "Maximum": results["Maximum"],
-        }
-    )
-
-    df.to_csv(
-        DATA_DIR / "beta_scenarios.csv",
-        index=False,
-    )
-
-    return df
-
-
-# =============================================================================
-# Figure 2
-# =============================================================================
-
-def plot_scenarios(df):
-    """
-    Generates Figure 2.
-    """
-
-    plt.figure(figsize=(8, 6))
-
-    plt.plot(
-        df["beta0"],
-        df["Minimum"],
-        linewidth=3,
-        label="Minimum scenario",
-    )
-
-    plt.plot(
-        df["beta0"],
-        df["Reference"],
-        linewidth=3,
-        label="Reference scenario",
-    )
-
-    plt.plot(
-        df["beta0"],
-        df["Maximum"],
-        linewidth=3,
-        label="Maximum scenario",
-    )
-
-    plt.axhspan(0, 20, color="#c6dbef", alpha=0.35)
-    plt.axhspan(20, 40, color="#9ecae1", alpha=0.35)
-    plt.axhspan(40, 60, color="#fee391", alpha=0.35)
-    plt.axhspan(60, 80, color="#fdae6b", alpha=0.35)
-    plt.axhspan(80, 100, color="#fb6a4a", alpha=0.35)
-
-    plt.xlabel(r"$\beta_0$")
-    plt.ylabel("Diagnostic support score (%)")
-    plt.title("Scenario analysis")
-
-    plt.legend()
-
-    plt.grid(True)
-
-    plt.tight_layout()
-
-    plt.savefig(
-        FIGURES_DIR / "Figure2_scenarios.png",
-        dpi=600,
-    )
-
-    plt.close()
-
-
-# =============================================================================
-# Pareto analysis
-# =============================================================================
-
-def pareto_analysis(C, I, R, H, D, U):
-    """
-    Computes relative contribution of each diagnostic domain.
-    """
-
-    labels = [
-        "Retinal (R)",
-        "Imaging (I)",
-        "Clinical (C)",
-        "History (H)",
-        "Differential diagnosis (D)",
-        "Uncertainty (U)",
-    ]
-
-    values = np.array([
-        DOMAIN_WEIGHTS["R"] * R,
-        DOMAIN_WEIGHTS["I"] * I,
-        DOMAIN_WEIGHTS["C"] * C,
-        DOMAIN_WEIGHTS["H"] * H,
-        DOMAIN_WEIGHTS["D"] * D,
-        DOMAIN_WEIGHTS["U"] * U,
-    ])
-
-    contribution = values / np.sum(values) * 100
-    cumulative = np.cumsum(contribution)
-
     df = pd.DataFrame({
-        "Component": labels,
-        "Contribution": contribution,
-        "Cumulative": cumulative,
+        "C": C,
+        "I": I,
+        "R": R,
+        "H": H,
+        "D": D,
+        "U": U,
+        "Diagnostic_support_score": scores,
     })
 
-    df.to_csv(
-        DATA_DIR / "pareto_data.csv",
+    df.to_csv(DATA_DIR / "Figure6_clinical_case_simulation.csv", index=False)
+
+    summary = pd.DataFrame([{
+        "n": n,
+        "seed": seed,
+        "mean": float(np.mean(scores)),
+        "sd": float(np.std(scores, ddof=1)),
+        "2.5th_percentile": float(np.percentile(scores, 2.5)),
+        "97.5th_percentile": float(np.percentile(scores, 97.5)),
+        "minimum": float(np.min(scores)),
+        "maximum": float(np.max(scores)),
+    }])
+
+    summary.to_csv(
+        DATA_DIR / "Figure6_clinical_case_summary.csv",
         index=False,
     )
 
-    return df
+    return scores, summary
 
 
-# =============================================================================
-# Figure 3
-# =============================================================================
+def plot_clinical_case(scores, summary):
+    mean_score = float(summary.loc[0, "mean"])
 
-def plot_pareto(df):
-    """
-    Generates Pareto chart of domain contributions.
-    """
-
-    fig, ax1 = plt.subplots(figsize=(9, 6))
-
-    ax1.bar(
-        df["Component"],
-        df["Contribution"],
-        color="lightgray",
-        edgecolor="black",
-    )
-
-    ax1.set_ylabel("Contribution (%)")
-
-    plt.xticks(rotation=40, ha="right")
-
-    ax2 = ax1.twinx()
-
-    ax2.plot(
-        df["Cumulative"],
-        "-o",
-        color="red",
-        linewidth=2,
-    )
-
-    ax2.set_ylabel(
-        "Cumulative (%)",
-        color="red",
-    )
-
-    ax2.tick_params(
-        axis="y",
-        colors="red",
-    )
-
-    plt.title("Pareto analysis")
-
-    plt.tight_layout()
-
-    plt.savefig(
-        FIGURES_DIR / "Figure3_pareto.png",
-        dpi=600,
-    )
-
-    plt.close(fig)
-    
-
-
-
-
-
-
-
-
-
-    
-
-# =============================================================================
-# Figure 4
-# =============================================================================
-# =============================================================================
-# Contour analysis
-# =============================================================================
-
-def contour_analysis():
-    """
-    Generates contour plot matrix.
-    """
-
-    r_values = np.linspace(10, 100, 91)
-    i_values = np.linspace(10, 100, 91)
-
-    z = np.zeros((len(i_values), len(r_values)))
-
-    C = 0.70
-    H = 0.50
-    D = 0.30
-    U = 0.30
-
-    for i, imaging in enumerate(i_values):
-
-        for j, retinal in enumerate(r_values):
-
-            probability, _ = compute_probability(
-                C,
-                imaging / 100,
-                retinal / 100,
-                H,
-                D,
-                U,
-            )
-
-            z[i, j] = probability * 100
-
-    pd.DataFrame(z).to_csv(
-        DATA_DIR / "heatmap_matrix.csv",
-        index=False,
-    )
-
-    return r_values, i_values, z
-
-
-
-def plot_contour(r_values, i_values, z):
-    """
-    Generates contour plot of the diagnostic support score.
-    """
-
-    fig = plt.figure(figsize=(8, 7))
-
-    contour = plt.contourf(
-        r_values,
-        i_values,
-        z,
-        levels=25,
-        cmap="jet",
-    )
-
-    plt.contour(
-        r_values,
-        i_values,
-        z,
-        colors="black",
-        linewidths=1,
-        linestyles="dashed",
-    )
-
-    plt.xlabel("Retinal score (R %)")
-
-    plt.ylabel("Imaging score (I %)")
-
-    colorbar = plt.colorbar(contour)
-
-    colorbar.set_label(
-        "Diagnostic support score (%)"
-    )
-
-    plt.tight_layout()
-
-    plt.savefig(
-        FIGURES_DIR / "Figure4_contour.png",
-        dpi=600,
-        bbox_inches="tight",
-    )
-
-    plt.close(fig)
-
-
-
-
-
-
-# =============================================================================
-# Figure 5
-# =============================================================================
-# =============================================================================
-# Monte Carlo simulation
-# =============================================================================
-
-def monte_carlo_simulation(n=10000):
-    """
-    Performs Monte Carlo simulation.
-    """
-
-    probabilities = np.zeros(n)
-
-    for i in range(n):
-
-        C = np.random.rand()
-        I = np.random.rand()
-        R = np.random.rand()
-        H = np.random.rand()
-        D = np.random.rand()
-        U = np.random.rand()
-
-        probability, _ = compute_probability(
-            C,
-            I,
-            R,
-            H,
-            D,
-            U,
-        )
-
-        probabilities[i] = probability * 100
-
-    pd.DataFrame(
-        {"Probability": probabilities}
-    ).to_csv(
-        DATA_DIR / "monte_carlo.csv",
-        index=False,
-    )
-
-    return probabilities
-
-
-
-
-
-
-def plot_monte_carlo(probabilities):
-    """
-    Generates Monte Carlo histogram.
-    """
-
-    fig = plt.figure(figsize=(8, 6))
-
+    plt.figure(figsize=(8, 6))
     plt.hist(
-        probabilities,
+        scores,
         bins=30,
         edgecolor="black",
     )
+    plt.axvline(
+        mean_score,
+        linestyle="--",
+        linewidth=2,
+        label=f"Mean = {mean_score:.3f}",
+    )
 
-    plt.xlabel("Diagnostic support score (%)")
-
+    plt.xlabel("Diagnostic support score")
     plt.ylabel("Frequency")
-
-    plt.title("Monte Carlo simulation")
-
-    plt.grid(True)
-
+    plt.legend()
     plt.tight_layout()
-
     plt.savefig(
-        FIGURES_DIR / "Figure5_monte_carlo.png",
+        FIGURES_DIR / "Figure6_clinical_case.png",
         dpi=600,
         bbox_inches="tight",
     )
+    plt.close()
 
-    plt.close(fig)
+
+# =============================================================================
+# Additional illustrative scenarios
+# =============================================================================
+
+def additional_scenarios():
+    rows = []
+    for name, scenario in (
+        ("Scenario 2", SCENARIO_2),
+        ("Scenario 3", SCENARIO_3),
+    ):
+        score, linear_score = calculate_scenario(scenario)
+        rows.append({
+            "Scenario": name,
+            "C": scenario["C"],
+            "I": scenario["I"],
+            "R": scenario["R"],
+            "H": scenario["H"],
+            "D": scenario["D"],
+            "U": scenario["U"],
+            "beta0": BETA0,
+            "linear_score": linear_score,
+            "diagnostic_support_score": score,
+        })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(DATA_DIR / "additional_scenarios.csv", index=False)
+    return df
+
+
+# =============================================================================
+# Sensitivity and uncertainty analysis
+# =============================================================================
+
+def perturb_weights(weights, rng):
+    """Perturb weights independently by ±50% and renormalize."""
+    perturbed = np.asarray(weights, dtype=float) * rng.uniform(
+        0.50, 1.50, size=len(weights)
+    )
+    return perturbed / perturbed.sum()
+
+
+def compute_within_domain_scores(values, within_weight_sets):
+    """Compute C, I, R, H, D and U from perturbed within-domain weights."""
+    return np.array([
+        weighted_score(values["C"], within_weight_sets["C"]),
+        weighted_score(values["I"], within_weight_sets["I"]),
+        weighted_score(values["R"], within_weight_sets["R"]),
+        weighted_score(values["H"], within_weight_sets["H"]),
+        weighted_score(values["D"], within_weight_sets["D"]),
+        weighted_score(values["U"], within_weight_sets["U"]),
+    ])
+
+
+def sensitivity_analysis(n=10000, seed=20260811):
+    """
+    Perform the ±50% coefficient perturbation analysis described in Section 2.11.
+
+    The manuscript does not specify a random seed for this analysis. A fixed
+    seed is used here to make the public implementation reproducible; the
+    reported manuscript summary values should therefore be interpreted as
+    rounded reference results rather than as a claim that this seed was used
+    in the manuscript calculations.
+    """
+    rng = np.random.default_rng(seed)
+
+    base_domain = np.array([
+        DOMAIN_WEIGHTS["C"],
+        DOMAIN_WEIGHTS["I"],
+        DOMAIN_WEIGHTS["R"],
+        DOMAIN_WEIGHTS["H"],
+        DOMAIN_WEIGHTS["D"],
+        DOMAIN_WEIGHTS["U"],
+    ])
+
+    scenario_arrays = {
+        "Minimum": scenario_to_array(MINIMUM_SCENARIO),
+        "Reference": scenario_to_array(REFERENCE_SCENARIO),
+        "Maximum": scenario_to_array(MAXIMUM_SCENARIO),
+    }
+
+    domain_results = {name: [] for name in scenario_arrays}
+
+    within_base = {
+        "C": CLINICAL_WEIGHTS,
+        "I": IMAGING_WEIGHTS,
+        "R": RETINAL_WEIGHTS,
+        "H": HISTORY_WEIGHTS,
+        "D": DIFFERENTIAL_WEIGHTS,
+        "U": UNCERTAINTY_WEIGHTS,
+    }
+
+    reference_components = {
+        "C": np.array([0.70, 0.70, 0.70, 0.70]),
+        "I": np.array([0.70, 0.70, 0.70, 0.70]),
+        "R": np.array([0.70, 0.70, 0.70, 0.70]),
+        "H": np.array([0.50, 0.50, 0.50, 0.50]),
+        "D": np.array([0.30, 0.30, 0.30, 0.30]),
+        "U": np.array([0.30, 0.30, 0.30, 0.30]),
+    }
+
+    within_results = []
+    joint_results = []
+
+    for _ in range(n):
+        domain_w = perturb_weights(base_domain, rng)
+        domain_dict = dict(zip(
+            ["C", "I", "R", "H", "D", "U"],
+            domain_w,
+        ))
+
+        for name, values in scenario_arrays.items():
+            score = compute_support_score(
+                *values,
+                beta0=BETA0,
+                domain_weights=domain_dict,
+            )[0]
+            domain_results[name].append(score)
+
+        within_w = {
+            key: perturb_weights(value, rng)
+            for key, value in within_base.items()
+        }
+
+        within_scores = compute_within_domain_scores(
+            reference_components,
+            within_w,
+        )
+
+        within_score = compute_support_score(
+            *within_scores,
+            beta0=BETA0,
+        )[0]
+        within_results.append(within_score)
+
+        joint_score = compute_support_score(
+            *within_scores,
+            beta0=BETA0,
+            domain_weights=domain_dict,
+        )[0]
+        joint_results.append(joint_score)
+
+    def summarize(values):
+        values = np.asarray(values)
+        return {
+            "Mean": np.mean(values),
+            "Median": np.median(values),
+            "2.5th_percentile": np.percentile(values, 2.5),
+            "97.5th_percentile": np.percentile(values, 97.5),
+            "Minimum": np.min(values),
+            "Maximum": np.max(values),
+        }
+
+    table3 = pd.DataFrame({
+        scenario: summarize(values)
+        for scenario, values in domain_results.items()
+    }).T
+    table3.index.name = "Scenario"
+    table3.to_csv(DATA_DIR / "Table3_domain_level_sensitivity.csv")
+
+    table4 = pd.DataFrame({
+        "Within-domain coefficients": summarize(within_results),
+        "Joint domain-level and within-domain coefficients": summarize(joint_results),
+    }).T
+    table4.index.name = "Analysis"
+    table4.to_csv(DATA_DIR / "Table4_within_domain_joint_sensitivity.csv")
+
+    return table3, table4
+
+
+# =============================================================================
+# Verification
+# =============================================================================
+
+def verify_key_results():
+    """Print key numerical checks against the manuscript specification."""
+    minimum_score, _ = calculate_scenario(MINIMUM_SCENARIO)
+    reference_score, _ = calculate_scenario(REFERENCE_SCENARIO)
+    maximum_score, _ = calculate_scenario(MAXIMUM_SCENARIO)
+    scenario2_score, _ = calculate_scenario(SCENARIO_2)
+    scenario3_score, _ = calculate_scenario(SCENARIO_3)
+
+    print("\nKey numerical checks")
+    print("--------------------")
+    print(f"Minimum scenario:   {minimum_score:.6f}")
+    print(f"Reference scenario: {reference_score:.6f}")
+    print(f"Maximum scenario:   {maximum_score:.6f}")
+    print(f"Scenario 2:         {scenario2_score:.6f}")
+    print(f"Scenario 3:         {scenario3_score:.6f}")
+
+    scores, summary = clinical_case_simulation()
+    print("\nClinical case simulation")
+    print("------------------------")
+    print(f"Mean:               {summary.loc[0, 'mean']:.6f}")
+    print(f"SD:                 {summary.loc[0, 'sd']:.6f}")
+    print(f"2.5th percentile:   {summary.loc[0, '2.5th_percentile']:.6f}")
+    print(f"97.5th percentile:  {summary.loc[0, '97.5th_percentile']:.6f}")
+
+    expected = {
+        "minimum": 0.574442,
+        "reference": 0.727108,
+        "maximum": 0.785835,
+        "scenario2": 0.771182,
+        "scenario3": 0.683521,
+        "clinical_mean": 0.739717,
+    }
+
+    actual = {
+        "minimum": minimum_score,
+        "reference": reference_score,
+        "maximum": maximum_score,
+        "scenario2": scenario2_score,
+        "scenario3": scenario3_score,
+        "clinical_mean": float(summary.loc[0, "mean"]),
+    }
+
+    for key, expected_value in expected.items():
+        if not np.isclose(actual[key], expected_value, atol=1e-5):
+            raise AssertionError(
+                f"Verification failed for {key}: "
+                f"{actual[key]:.8f} != {expected_value:.8f}"
+            )
+
+    print("\nVerification: PASS")
 
 
 # =============================================================================
@@ -742,103 +757,45 @@ def plot_monte_carlo(probabilities):
 # =============================================================================
 
 def main():
-    """
-    Executes the complete AHT framework.
-    """
-
-    print("\n======================================")
+    print("\n==============================================")
     print(" AHT Decision-Support Framework")
-    print("======================================")
+    print(" Reproducible implementation v2.0")
+    print("==============================================")
 
-    # -------------------------------------------------------------------------
-    # Example
-    # -------------------------------------------------------------------------
+    verify_key_results()
 
-    run_example()
-
-    # -------------------------------------------------------------------------
-    # Figure 1
-    # -------------------------------------------------------------------------
-
-    print("\nGenerating Figure 1...")
-
-    beta_df = beta_sensitivity()
-
-    plot_beta_sensitivity(beta_df)
-
-    # -------------------------------------------------------------------------
-    # Figure 2
-    # -------------------------------------------------------------------------
-
-    print("Generating Figure 2...")
-
-    scenario_df = scenario_analysis()
-
-    plot_scenarios(scenario_df)
-
-    # -------------------------------------------------------------------------
-    # Example case
-    # -------------------------------------------------------------------------
-
-    C = compute_C([0.8, 0.7, 0.8, 0.6])
-    I = compute_I([0.9, 0.8, 0.7, 0.8])
-    R = compute_R([0.9, 0.8, 0.9, 0.8])
-    H = compute_H([0.6, 0.5, 0.5, 0.4])
-    D = compute_D([0.4, 0.3, 0.2, 0.3])
-    U = compute_U([0.5, 0.4, 0.4, 0.5])
-
-    # -------------------------------------------------------------------------
-    # Figure 3
-    # -------------------------------------------------------------------------
+    print("\nGenerating Figure 2...")
+    df2 = beta_sensitivity()
+    plot_beta_sensitivity(df2)
 
     print("Generating Figure 3...")
-
-    pareto_df = pareto_analysis(
-        C,
-        I,
-        R,
-        H,
-        D,
-        U,
-    )
-
-    plot_pareto(pareto_df)
-
-    # -------------------------------------------------------------------------
-    # Figure 4
-    # -------------------------------------------------------------------------
+    df3 = scenario_analysis()
+    plot_scenarios(df3)
 
     print("Generating Figure 4...")
-
-    r_values, i_values, z = contour_analysis()
-
-    plot_contour(
-        r_values,
-        i_values,
-        z,
-    )
-
-    # -------------------------------------------------------------------------
-    # Figure 5
-    # -------------------------------------------------------------------------
+    df4 = domain_contribution_analysis()
+    plot_domain_contributions(df4)
 
     print("Generating Figure 5...")
+    r_values, i_values, z = contour_analysis()
+    plot_contour(r_values, i_values, z)
 
-    mc = monte_carlo_simulation()
+    print("Generating Figure 6...")
+    scores, summary = clinical_case_simulation()
+    plot_clinical_case(scores, summary)
 
-    plot_monte_carlo(mc)
+    print("Generating additional illustrative scenarios...")
+    additional_scenarios()
 
-    print("\n======================================")
+    print("Running coefficient sensitivity analysis...")
+    sensitivity_analysis()
+
+    print("\n==============================================")
     print("Analysis completed successfully.")
-    print("======================================")
+    print(f"Figures: {FIGURES_DIR}")
+    print(f"Data:    {DATA_DIR}")
+    print("==============================================")
 
-    print(f"\nFigures saved to : {FIGURES_DIR}")
-    print(f"CSV files saved to: {DATA_DIR}")
-
-
-# =============================================================================
-# Entry point
-# =============================================================================
 
 if __name__ == "__main__":
     main()
